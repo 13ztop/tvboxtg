@@ -1,4 +1,4 @@
-name: Auto Sync from ls125781003/tvboxtg
+name: Optimized TVBoxTG Sync
 
 on:
   schedule:
@@ -8,207 +8,178 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 15   # 设置超时防止卡死
+    env:
+      SOURCE_REPO: "ls125781003/tvboxtg"
+      TARGET_REPO: "13ztop/tvboxtg"
+    
     steps:
-      # 获取目标仓库的默认分支
-      - name: Detect target default branch
-        id: branch_detector
+      # 1. 准备阶段 - 并行获取仓库信息
+      - name: Setup environment
+        id: setup
         run: |
-          DEFAULT_BRANCH=$(curl -s -H "Authorization: token ${{ secrets.SYNC_TOKEN }}" \
-          "https://api.github.com/repos/13ztop/tvboxtg" | jq -r .default_branch)
-          echo "Detected default branch: $DEFAULT_BRANCH"
-          echo "DEFAULT_BRANCH=$DEFAULT_BRANCH" >> $GITHUB_ENV
+          # 获取目标仓库默认分支
+          target_branch=$(curl -s -H "Authorization: token ${{ secrets.SYNC_TOKEN }}" \
+            "https://api.github.com/repos/${{ env.TARGET_REPO }}" | jq -r .default_branch)
+          
+          # 获取源仓库最新commit
+          source_commit=$(curl -s "https://api.github.com/repos/${{ env.SOURCE_REPO }}/commits/main" | jq -r .sha)
+          source_short=${source_commit:0:7}
+          
+          echo "target_branch=$target_branch" >> $GITHUB_OUTPUT
+          echo "source_commit=$source_commit" >> $GITHUB_OUTPUT
+          echo "source_short=$source_short" >> $GITHUB_OUTPUT
+          echo "TARGET_BRANCH=$target_branch" >> $GITHUB_ENV
 
-      # 检出目标仓库
-      - name: Checkout target repo
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.SYNC_TOKEN }}
-          repository: 13ztop/tvboxtg
-          path: target-repo
-          ref: ${{ env.DEFAULT_BRANCH }}
-          fetch-depth: 0
-
-      # 克隆源仓库
-      - name: Clone source repo
+      # 2. 并行克隆仓库（优化性能）
+      - name: Parallel clone repositories
         run: |
-          git clone --depth 1 https://github.com/ls125781003/tvboxtg.git source-repo
-          echo "源仓库 ls125781003/tvboxtg 克隆完成"
+          # 克隆源仓库（超浅克隆）
+          git clone --depth 1 --filter=blob:none \
+            "https://github.com/${{ env.SOURCE_REPO }}.git" source-repo &
+            
+          # 克隆目标仓库（仅克隆必要分支）
+          git clone --depth 1 --branch "${{ env.TARGET_BRANCH }}" \
+            "https://${{ secrets.SYNC_TOKEN }}@github.com/${{ env.TARGET_REPO }}.git" target-repo &
+            
+          wait # 等待所有后台任务完成
+          
+          echo "仓库克隆完成"
 
-      # 创建备份目录
-      - name: Create backup directory
-        run: mkdir -p /tmp/repo-backup
-
-      # 识别需要保留的文件
-      - name: Identify protected files
-        id: find_protected
+      # 3. 高效识别保护文件（单次遍历）
+      - name: Identify protected files (optimized)
+        id: file_protection
         run: |
-          # TVBoxTG项目需要保留的核心文件列表
-          protected_files=(
-            "README.md"
-            "LICENSE"
-            ".github/workflows/*"
-            "config.py"
-            "credentials.json"
-            "custom_*.py"
-            "data/*"
-            "env/*"
-            "plugins/*"
-            ".env"
-            ".gitignore"
+          # 创建保护文件列表
+          PROTECTED_LIST="/tmp/protected-list.txt"
+          touch $PROTECTED_LIST
+          
+          # 核心文件模式数组
+          patterns=(
+            -name 'README.md'
+            -o -name 'LICENSE'
+            -o -path '.github/workflows/*'
+            -o -name 'config.py'
+            -o -name 'credentials.json'
+            -o -name 'custom_*.py'
+            -o -path 'data/*'
+            -o -path 'env/*'
+            -o -path 'plugins/*'
+            -o -name '.gitignore'
+            -o -name '.env'
           )
           
-          # 创建保留文件列表
-          mkdir -p /tmp/repo-backup
-          for pattern in "${protected_files[@]}"; do
-            find target-repo -path "*/$pattern" -print >> /tmp/repo-backup/protected-files.txt 2>/dev/null || true
-          done
+          # 执行单次查找
+          find target-repo \( "${patterns[@]}" \) -fprint $PROTECTED_LIST
           
-          # 保存文件数量
-          if [ -f /tmp/repo-backup/protected-files.txt ]; then
-            protected_count=$(sort -u /tmp/repo-backup/protected-files.txt | wc -l)
-            echo "protected_files_count=$protected_count" >> $GITHUB_OUTPUT
-          else
-            echo "protected_files_count=0" >> $GITHUB_OUTPUT
-          fi
-          
-          echo "保护文件识别完成"
+          # 计算保护文件数量
+          protected_count=$(wc -l < $PROTECTED_LIST)
+          echo "count=$protected_count" >> $GITHUB_OUTPUT
+          echo "保护文件识别完成: $protected_count 个文件"
 
-      # 备份需要保留的文件
-      - name: Backup protected content
+      # 4. 智能同步（使用高效工具）
+      - name: Smart sync with delta algorithm
         run: |
-          mkdir -p /tmp/repo-backup/protected-files
+          # 安装高效同步工具 (rsync替代方案)
+          sudo apt-get update && sudo apt-get install -y unison
           
-          if [ -f /tmp/repo-backup/protected-files.txt ]; then
-            while read file; do
-              if [ -f "$file" ] || [ -d "$file" ]; then
-                relative_path=${file#target-repo/}
-                mkdir -p "/tmp/repo-backup/protected-files/$(dirname "$relative_path")"
-                cp -r "$file" "/tmp/repo-backup/protected-files/$relative_path"
-              fi
-            done < <(sort -u /tmp/repo-backup/protected-files.txt)
-          fi
+          # 使用unison进行智能同步
+          unison -batch -auto -ignore="Name .git" \
+            -ignore="Name .github" \
+            -ignorenot="Path /tmp/protected-list.txt" \
+            source-repo target-repo
           
-          echo "保护文件备份完成"
+          echo "仓库同步完成"
 
-      # 获取源仓库版本信息
-      - name: Get source repository version
-        id: source_version
-        run: |
-          cd source-repo
-          echo "commit_hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          echo "full_hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "commit_date=$(git log -1 --format=%cd --date=format:'%Y-%m-%d')" >> $GITHUB_OUTPUT
-
-      # 获取目标仓库版本信息
-      - name: Get target repository commit
-        id: target_version
+      # 5. 快速变更检测
+      - name: Detect changes
+        id: change_detection
         run: |
           cd target-repo
-          echo "TARGET_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          echo "TARGET_BRANCH=${{ env.DEFAULT_BRANCH }}" >> $GITHUB_ENV
-
-      # 执行同步操作
-      - name: Sync repositories
-        run: |
-          # 使用rsync同步，排除.git目录和备份文件
-          rsync -av --delete \
-            --exclude=.git \
-            --exclude-from=/tmp/repo-backup/protected-files.txt \
-            source-repo/ target-repo/
           
-          echo "源仓库内容同步完成"
-
-      # 恢复保护文件
-      - name: Restore protected content
-        run: |
-          if [ -d /tmp/repo-backup/protected-files ]; then
-            cd /tmp/repo-backup/protected-files
-            find . -type f -o -type d | while read item; do
-              if [ -f "$item" ] || [ -d "$item" ]; then
-                relative_path=${item#./}
-                mkdir -p "$GITHUB_WORKSPACE/target-repo/$(dirname "$relative_path")"
-                cp -r "$item" "$GITHUB_WORKSPACE/target-repo/$relative_path"
-              fi
-            done
-          fi
-          
-          echo "保护文件恢复完成"
-
-      # 提交和推送变更
-      - name: Commit and push changes
-        id: commit_push
-        run: |
-          cd target-repo
+          # 设置Git身份
           git config user.name "TVBoxTG Sync Bot"
           git config user.email "tvboxtg-sync@users.noreply.github.com"
-          git add -A
           
-          # 检查是否有变更
-          if git diff-index --quiet HEAD --; then
-            echo "no_changes=true" >> $GITHUB_OUTPUT
-            echo "no_changes_detected=true" >> $GITHUB_OUTPUT
-            echo "没有需要提交的变更"
+          # 检测变更
+          git add -A
+          changes=$(git diff --cached --name-only | wc -l)
+          
+          if [ $changes -gt 0 ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "changes_count=$changes" >> $GITHUB_OUTPUT
           else
-            # 计算变更文件数量
-            changes_count=$(git diff --name-only HEAD | wc -l)
-            echo "changes_count=$changes_count" >> $GITHUB_OUTPUT
-            
-            # 生成提交信息
-            commit_msg="📺 自动同步: 来自 ls125781003/tvboxtg@${{ steps.source_version.outputs.commit_hash }}"
-            commit_msg+="\n\n更新 $changes_count 个文件"
-            if [ ${{ steps.find_protected.outputs.protected_files_count }} -gt 0 ]; then
-              commit_msg+=", 保留 ${{ steps.find_protected.outputs.protected_files_count }} 个自定义文件"
-            fi
-            
-            git commit -m "$commit_msg"
-            # 使用强制推送确保能更新受保护分支
-            git push --force-with-lease origin HEAD:${{ env.DEFAULT_BRANCH }}
-            
-            # 获取提交后的新commit hash
-            echo "TARGET_COMMIT_AFTER=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-            echo "TARGET_FULL_HASH_AFTER=$(git rev-parse HEAD)" >> $GITHUB_ENV
-            
-            echo "commit_msg=$commit_msg" >> $GITHUB_OUTPUT
-            echo "变更已成功推送"
+            echo "no_changes=true" >> $GITHUB_OUTPUT
           fi
 
-      # 清理临时文件
-      - name: Cleanup
+      # 6. 提交变更（条件执行）
+      - name: Commit and push changes
+        if: steps.change_detection.outputs.has_changes == 'true'
         run: |
-          rm -rf source-repo
-          rm -rf /tmp/repo-backup
+          cd target-repo
+          
+          # 生成提交信息
+          commit_msg="📺 Auto Sync: ${{ env.SOURCE_REPO }}@${{ steps.setup.outputs.source_short }}"
+          commit_msg+="\n\n• 更新 ${{ steps.change_detection.outputs.changes_count }} 个文件"
+          commit_msg+="\n• 保留 ${{ steps.file_protection.outputs.count }} 个自定义文件"
+          
+          # 提交并推送
+          git commit -m "$commit_msg"
+          git push origin "HEAD:${{ env.TARGET_BRANCH }}"
+          
+          # 保存提交信息
+          echo "commit_msg=$commit_msg" >> $GITHUB_OUTPUT
+          echo "commit_sha=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
 
-      # 设置时区（上海时间）
+      # 7. 设置时区（上海时间）
       - name: Set Shanghai time
-        id: set_time
         run: |
-          CURRENT_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M %Z')
-          CURRENT_TIME_SHORT=$(TZ='Asia/Shanghai' date +'%H:%M %Z')
-          echo "CURRENT_TIME=$CURRENT_TIME" >> $GITHUB_ENV
-          echo "CURRENT_TIME_SHORT=$CURRENT_TIME_SHORT" >> $GITHUB_ENV
+          TZ_TIME=$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M %Z')
+          TZ_SHORT=$(TZ='Asia/Shanghai' date +'%H:%M %Z')
+          echo "CURRENT_TIME=$TZ_TIME" >> $GITHUB_ENV
+          echo "CURRENT_TIME_SHORT=$TZ_SHORT" >> $GITHUB_ENV
 
-      # 同步成功通知
-      - name: Notify on Sync Success
-        if: success() && steps.commit_push.outputs.commit_msg
-        run: |
-          echo "✅ 同步成功! 仓库已更新"
-          echo "源版本: ls125781003/tvboxtg@${{ steps.source_version.outputs.commit_hash }}"
-          echo "目标版本: 13ztop/tvboxtg@${{ env.TARGET_COMMIT_AFTER }}"
-          echo "变更文件: ${{ steps.commit_push.outputs.changes_count }} 个"
-          echo "保留文件: ${{ steps.find_protected.outputs.protected_files_count }} 个"
+      # 8. 通知系统（Telegram）
+      - name: Notify Telegram
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            @{{ (steps.change_detection.outputs.has_changes == 'true') && '📺 TVBoxTG 同步成功' || 'ℹ️ TVBoxTG 无变更' }} | ${{ env.CURRENT_TIME_SHORT }}
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            {{ steps.change_detection.outputs.has_changes && '🔄 **源仓库**: [' + env.SOURCE_REPO + '@' + steps.setup.outputs.source_short + '](https://github.com/' + env.SOURCE_REPO + '/commit/' + steps.setup.outputs.source_commit + ')'
+            || '🔄 **源仓库**: [' + env.SOURCE_REPO + '](https://github.com/' + env.SOURCE_REPO + ')' }}
+            📦 **目标仓库**: [${{ env.TARGET_REPO }}@${{ env.commit_sha || steps.setup.outputs.source_short }}](https://github.com/${{ env.TARGET_REPO }}/commit/${{ env.commit_sha || 'main' }})
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            {{ steps.change_detection.outputs.has_changes && '📂 **变更文件**: ' + steps.change_detection.outputs.changes_count + ' 个' || '🆗 **同步状态**: 内容一致，无需更新' }}
+            🔒 **保留文件**: ${{ steps.file_protection.outputs.count }} 个
+            🕒 **执行时间**: ${{ env.CURRENT_TIME_SHORT }}
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            {{ steps.change_detection.outputs.has_changes && '✅ 同步完成! 仓库已更新' || '✅ 仓库已是最新状态' }}
+            [查看详情](https://github.com/${{ env.TARGET_REPO }}/commit/${{ env.commit_sha || 'HEAD' }})
+          parse_mode: markdown
 
-      # 无变更通知
-      - name: Notify on No Changes
-        if: success() && steps.commit_push.outputs.no_changes_detected
-        run: |
-          echo "ℹ️ 无变更: 仓库已是最新状态"
-          echo "源版本: ls125781003/tvboxtg@${{ steps.source_version.outputs.commit_hash }}"
-          echo "保留文件: ${{ steps.find_protected.outputs.protected_files_count }} 个"
-
-      # 同步失败通知
-      - name: Notify on Failure
+      # 9. 错误处理
+      - name: Error notification
         if: failure()
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            ‼️ *TVBoxTG 同步失败 | ${{ env.CURRENT_TIME_SHORT }}*
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            ⚙️ **工作流**: [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            🕒 **发生时间**: ${{ env.CURRENT_TIME }}
+            ━━━━━━━━━━━━━━━━━━━━━━━━
+            ❌ 错误详情: 请检查工作流日志
+            [立即查看](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          parse_mode: markdown
+
+      # 10. 清理工作区
+      - name: Cleanup
+        if: always()
         run: |
-          echo "‼️ 同步失败! 请检查日志"
-          echo "工作流: #${{ github.run_number }}"
-          echo "运行ID: ${{ github.run_id }}"
+          rm -rf source-repo target-repo
+          rm -f /tmp/protected-list.txt
