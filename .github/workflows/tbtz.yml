@@ -46,15 +46,18 @@ jobs:
           
           echo "仓库克隆完成"
 
-      # 3. 高效识别保护文件（单次遍历）
+      # 3. 高效识别保护文件（修复路径格式）
       - name: Identify protected files (optimized)
         id: file_protection
         run: |
-          # 创建保护文件列表
+          # 创建保护文件列表（使用相对路径）
           PROTECTED_LIST="/tmp/protected-list.txt"
-          touch $PROTECTED_LIST
+          > $PROTECTED_LIST  # 清空文件
           
-          # 核心文件模式数组
+          # 进入目标目录生成相对路径
+          cd target-repo
+          
+          # 核心文件模式数组（使用相对路径）
           patterns=(
             -name 'README.md'
             -o -name 'LICENSE'
@@ -69,24 +72,35 @@ jobs:
             -o -name '.env'
           )
           
-          # 执行单次查找
-          find target-repo \( "${patterns[@]}" \) -fprint $PROTECTED_LIST
+          # 执行查找并输出相对路径
+          find . \( "${patterns[@]}" \) -print | sed 's|^\./||' >> $PROTECTED_LIST
           
           # 计算保护文件数量
           protected_count=$(wc -l < $PROTECTED_LIST)
           echo "count=$protected_count" >> $GITHUB_OUTPUT
+          echo "保护文件列表:"
+          cat $PROTECTED_LIST
           echo "保护文件识别完成: $protected_count 个文件"
 
-      # 4. 智能同步（使用高效工具）
+      # 4. 智能同步（修复路径错误）
       - name: Smart sync with delta algorithm
         run: |
           # 安装高效同步工具 (rsync替代方案)
           sudo apt-get update && sudo apt-get install -y unison
           
-          # 使用unison进行智能同步
+          # 使用正确的路径格式（去掉前导斜杠）
+          echo "使用保护列表:"
+          cat /tmp/protected-list.txt
+          
+          # 构建Unison排除参数（避免使用绝对路径）
+          exclude_args=()
+          while IFS= read -r pattern; do
+            exclude_args+=("-ignorenot=Path $pattern")
+          done < /tmp/protected-list.txt
+          
+          # 执行同步
           unison -batch -auto -ignore="Name .git" \
-            -ignore="Name .github" \
-            -ignorenot="Path /tmp/protected-list.txt" \
+            "${exclude_args[@]}" \
             source-repo target-repo
           
           echo "仓库同步完成"
